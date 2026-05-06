@@ -1,0 +1,13 @@
+/.env
+/describe_orders.sql
+/docker-compose.yml
+/drop_orders.sql
+/drop_staging.sql
+/test_snowflake_connection.py
+# Ignore Airflow logs
+logs/
+*.log
+
+# Ignore Python virtual environments
+.venv/
+__pycache__/
