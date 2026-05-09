@@ -7,22 +7,30 @@ since the last successful run using a watermark table in Snowflake.
 Flow:
   start
     ├── get_watermarks          (reads last success timestamps)
-    ├── incremental_orders      (API, since watermark)
-    └── incremental_customers   (API, since watermark)
+    ├── incremental_products    (API, since watermark)
+    ├── incremental_users       (API, since watermark)
+    └── incremental_orders      (DB, since watermark)
           ↓
-    ├── transform_orders
-    └── transform_customers
+    ├── transform_products
+    ├── transform_users
+    └── transform_orders
           ↓
-    ├── upsert_orders
-    └── upsert_customers
+    ├── upsert_products
+    ├── upsert_users
+    └── upsert_orders
+          ↓
+    validate_incremental_loads
           ↓
     update_watermarks
           ↓
     end
 """
+import json
 import logging
 import sys
 from datetime import datetime, timezone
+
+import numpy as np
 
 sys.path.append('/opt/airflow')
 
@@ -42,6 +50,70 @@ logger = logging.getLogger(__name__)
 PIPELINE_PRODUCTS = "incremental_products"
 PIPELINE_USERS    = "incremental_users"
 PIPELINE_ORDERS   = "incremental_orders"
+
+
+def _normalize_xcom_df(df: pd.DataFrame):
+    if df is None:
+        return []
+    df = df.copy()
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]) or pd.api.types.is_datetime64tz_dtype(df[col]):
+            df[col] = df[col].astype(str)
+
+    records = df.to_dict(orient="records")
+
+    def _normalize_value(value):
+        # Handle null/NaN for scalar types
+        try:
+            if pd.isna(value):
+                return None
+        except (ValueError, TypeError):
+            pass
+        
+        # Handle nested structures: lists, dicts, arrays
+        if isinstance(value, (list, dict, np.ndarray)):
+            return json.dumps(value, default=str)
+        
+        # Handle pandas/numpy scalars
+        if isinstance(value, (pd.Timestamp, datetime)):
+            return value.isoformat()
+        if isinstance(value, np.generic):
+            return value.item()
+        
+        return value
+
+    return [{k: _normalize_value(v) for k, v in rec.items()} for rec in records]
+
+
+def _deserialize_xcom_df(payload):
+    if payload is None:
+        return pd.DataFrame()
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return pd.DataFrame([payload])
+    if isinstance(payload, list):
+        # Try to parse JSON strings in list items (nested structures)
+        parsed_records = []
+        for rec in payload:
+            if isinstance(rec, dict):
+                parsed_rec = {}
+                for k, v in rec.items():
+                    if isinstance(v, str) and (v.startswith('[') or v.startswith('{')):
+                        try:
+                            parsed_rec[k] = json.loads(v)
+                        except (json.JSONDecodeError, ValueError):
+                            parsed_rec[k] = v
+                    else:
+                        parsed_rec[k] = v
+                parsed_records.append(parsed_rec)
+            else:
+                parsed_records.append(rec)
+        return pd.DataFrame.from_records(parsed_records)
+    if isinstance(payload, dict):
+        return pd.DataFrame.from_dict(payload)
+    return pd.DataFrame(payload)
 
 
 # ── Watermark helpers ─────────────────────────────────────────────────────
@@ -82,7 +154,7 @@ def _incremental_extract_products(**ctx):
     wm_str = ctx["ti"].xcom_pull(key="products_watermark")
     since  = datetime.fromisoformat(wm_str) if wm_str else None
     df     = extract_products(since=since)
-    ctx["ti"].xcom_push(key="products_raw", value=df.to_json())
+    ctx["ti"].xcom_push(key="products_raw", value=_normalize_xcom_df(df))
     logger.info("Incremental extract: %d products (since %s)", len(df), since)
     return len(df) > 0   # ShortCircuit: skip rest if nothing new
 
@@ -91,7 +163,7 @@ def _incremental_extract_users(**ctx):
     wm_str = ctx["ti"].xcom_pull(key="users_watermark")
     since  = datetime.fromisoformat(wm_str) if wm_str else None
     df     = extract_users(since=since)
-    ctx["ti"].xcom_push(key="users_raw", value=df.to_json())
+    ctx["ti"].xcom_push(key="users_raw", value=_normalize_xcom_df(df))
     logger.info("Incremental extract: %d users (since %s)", len(df), since)
     return len(df) > 0
 
@@ -100,7 +172,7 @@ def _incremental_extract_orders(**ctx):
     wm_str = ctx["ti"].xcom_pull(key="orders_watermark")
     since  = datetime.fromisoformat(wm_str) if wm_str else None
     df     = extract_orders(watermark=since)
-    ctx["ti"].xcom_push(key="orders_raw", value=df.to_json())
+    ctx["ti"].xcom_push(key="orders_raw", value=_normalize_xcom_df(df))
     logger.info("Incremental extract: %d orders (since %s)", len(df), since)
     return len(df) > 0
 
@@ -108,41 +180,62 @@ def _incremental_extract_orders(**ctx):
 # ── Transform ─────────────────────────────────────────────────────────────
 
 def _transform_products(**ctx):
-    raw = pd.read_json(ctx["ti"].xcom_pull(key="products_raw"))
-    ctx["ti"].xcom_push(key="products_transformed", value=transform_products(raw).to_json())
+    raw = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="products_raw"))
+    ctx["ti"].xcom_push(key="products_transformed", value=_normalize_xcom_df(transform_products(raw)))
 
 
 def _transform_users(**ctx):
-    raw = pd.read_json(ctx["ti"].xcom_pull(key="users_raw"))
-    ctx["ti"].xcom_push(key="users_transformed", value=transform_users(raw).to_json())
+    raw = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="users_raw"))
+    ctx["ti"].xcom_push(key="users_transformed", value=_normalize_xcom_df(transform_users(raw)))
 
 
 def _transform_orders(**ctx):
-    raw = pd.read_json(ctx["ti"].xcom_pull(key="orders_raw"))
-    ctx["ti"].xcom_push(key="orders_transformed", value=transform_orders(raw).to_json())
+    raw = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="orders_raw"))
+    ctx["ti"].xcom_push(key="orders_transformed", value=_normalize_xcom_df(transform_orders(raw)))
 
 
 # ── Load ──────────────────────────────────────────────────────────────────
 
 def _upsert_products(**ctx):
-    df   = pd.read_json(ctx["ti"].xcom_pull(key="products_transformed"))
+    df   = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="products_transformed"))
     rows = load_raw_products(df)
     ctx["ti"].xcom_push(key="products_rows_loaded", value=rows)
     logger.info("Upserted %d products", rows)
 
 
 def _upsert_users(**ctx):
-    df   = pd.read_json(ctx["ti"].xcom_pull(key="users_transformed"))
+    df   = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="users_transformed"))
     rows = load_raw_users(df)
     ctx["ti"].xcom_push(key="users_rows_loaded", value=rows)
     logger.info("Upserted %d users", rows)
 
 
 def _upsert_orders(**ctx):
-    df   = pd.read_json(ctx["ti"].xcom_pull(key="orders_transformed"))
+    df   = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="orders_transformed"))
     rows = load_raw_orders(df)
     ctx["ti"].xcom_push(key="orders_rows_loaded", value=rows)
     logger.info("Upserted %d orders", rows)
+
+
+def _validate_incremental_loads(**ctx):
+    products_rows = int(ctx["ti"].xcom_pull(key="products_rows_loaded") or 0)
+    users_rows = int(ctx["ti"].xcom_pull(key="users_rows_loaded") or 0)
+    orders_rows = int(ctx["ti"].xcom_pull(key="orders_rows_loaded") or 0)
+
+    logger.info(
+        "Incremental load metrics: products=%d, users=%d, orders=%d",
+        products_rows,
+        users_rows,
+        orders_rows,
+    )
+
+    if products_rows < 0 or users_rows < 0 or orders_rows < 0:
+        raise ValueError("Incremental load returned invalid row counts")
+
+    if products_rows == 0 and users_rows == 0 and orders_rows == 0:
+        logger.warning("No incremental rows loaded in this run; no watermark update will occur.")
+
+    ctx["ti"].xcom_push(key="incremental_validation_passed", value=True)
 
 
 # ── DAG definition ────────────────────────────────────────────────────────
@@ -196,6 +289,12 @@ with DAG(
         trigger_rule="none_failed_min_one_success",
     )
 
+    t_validate_incremental_loads = PythonOperator(
+        task_id="validate_incremental_loads",
+        python_callable=_validate_incremental_loads,
+        trigger_rule="none_failed",
+    )
+
     # ── Dependency graph ───────────────────────────────────────────────────
     start >> t_get_watermarks >> [t_extract_products, t_extract_users, t_extract_orders]
 
@@ -203,4 +302,4 @@ with DAG(
     t_extract_users    >> t_transform_users    >> t_upsert_users
     t_extract_orders   >> t_transform_orders   >> t_upsert_orders
 
-    [t_upsert_products, t_upsert_users, t_upsert_orders] >> t_update_watermarks >> end
+    [t_upsert_products, t_upsert_users, t_upsert_orders] >> t_validate_incremental_loads >> t_update_watermarks >> end

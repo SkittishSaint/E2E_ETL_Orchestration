@@ -5,6 +5,7 @@ Handles all writes to Snowflake:
   • Truncate-and-load (full replace)
   • Merge / upsert (incremental, SCD-1)
   • Watermark read & write for incremental pipelines
+  • Supports schema-aligned loading and Snowflake clustering optimization
 """
 import logging
 from datetime import datetime, timezone
@@ -70,15 +71,17 @@ class SnowflakeLoader:
         logger.info("Truncating %s before full load.", table)
         self.execute(f"TRUNCATE TABLE IF EXISTS {table}")
 
+        df = df.reset_index(drop=True)
         success, nchunks, nrows, _ = write_pandas(
             conn=self.conn,
             df=df,
             table_name=table_name,
             schema=schema,
             database=self.config.database,
-            auto_create_table=True,
+            auto_create_table=False,
             overwrite=False,
             quote_identifiers=False,
+            use_logical_type=True,
         )
         logger.info("Loaded %d rows into %s (%d chunks)", nrows, table, nchunks)
         return nrows
@@ -107,6 +110,7 @@ class SnowflakeLoader:
         # Step 1: load into staging
         logger.info("Loading %d rows into staging table %s", len(df), staging_table)
         self.execute(f"CREATE OR REPLACE TRANSIENT TABLE {staging_table} LIKE {target_table}")
+        df = df.reset_index(drop=True)
         write_pandas(
             conn=self.conn,
             df=df,
@@ -116,6 +120,7 @@ class SnowflakeLoader:
             auto_create_table=False,
             overwrite=True,
             quote_identifiers=False,
+            use_logical_type=True,
         )
 
         # Step 2: build MERGE statement

@@ -210,68 +210,6 @@ def transform_users(df: pd.DataFrame) -> pd.DataFrame:
 transform_customers = transform_users
 
 
-def transform_orders(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Clean and enrich raw order data from database sources.
-
-    Business rules:
-    - Normalize order identifiers and timestamps
-    - Flatten products array into separate columns
-    - Calculate order-level metrics
-    - Build stable surrogate key sk_order
-    """
-    logger.info("Transforming orders — input rows: %d", len(df))
-
-    # Ensure we have order_id
-    if "id" in df.columns and "order_id" not in df.columns:
-        df["order_id"] = df["id"]
-
-    # Drop rows without essential fields
-    df = df.dropna(subset=["order_id", "user_id"])
-
-    # Convert timestamps
-    df = cast_timestamps(df, ["created_at", "updated_at"])
-
-    # Handle products array - extract summary info
-    if "products" in df.columns:
-        # For now, keep products as JSON string, but add summary columns
-        df["products_json"] = df["products"].astype(str)
-
-        # Extract product count if products is a list
-        df["product_count"] = df["products"].apply(
-            lambda x: len(x) if isinstance(x, list) else 0
-        )
-
-        # Calculate total quantity from products
-        df["total_quantity_from_products"] = df["products"].apply(
-            lambda x: sum(p.get("quantity", 0) for p in x) if isinstance(x, list) else 0
-        )
-
-    # Ensure numeric fields are properly typed
-    numeric_cols = ["total", "discounted_total", "total_products", "total_quantity"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Add derived fields
-    df["order_value"] = df["total"].fillna(0)
-    df["discount_amount"] = df["total"].fillna(0) - df["discounted_total"].fillna(0)
-    df["avg_product_value"] = (df["order_value"] / df["total_products"]).where(df["total_products"] > 0, 0)
-
-    # Deduplication on order_id (keep latest updated_at)
-    df = drop_duplicates_on(df, subset=["order_id"])
-
-    # Create surrogate key
-    df["sk_order"] = df["order_id"].apply(lambda x: _hash_pk("order", x))
-
-    # Metadata
-    df["_transformed_at"] = _now_utc()
-    df["_pipeline_version"] = "1.0"
-
-    logger.info("Transform complete — output rows: %d", len(df))
-    return df.reset_index(drop=True)
-
-
 def transform_products(df: pd.DataFrame) -> pd.DataFrame:
     """
     Clean and enrich raw product catalogue data from DummyJSON or similar schema.
@@ -326,13 +264,21 @@ def build_daily_sales_agg(orders_df: pd.DataFrame) -> pd.DataFrame:
     Used to populate ANALYTICS.AGG_DAILY_SALES.
     """
     logger.info("Building daily sales aggregation.")
+
+    if "order_date" not in orders_df.columns:
+        raise ValueError("orders_df must contain order_date for aggregation")
+
+    orders_df = cast_timestamps(orders_df, ["order_date"])
+    if "status" not in orders_df.columns:
+        orders_df["status"] = "COMPLETED"
+
     agg = (
-        orders_df.groupby(["order_year", "order_month", pd.Grouper(key="order_date", freq="D")])
+        orders_df.groupby(pd.Grouper(key="order_date", freq="D"))
         .agg(
             order_count=("order_id", "count"),
-            total_revenue_usd=("total_amount_usd", "sum"),
-            avg_order_value_usd=("total_amount_usd", "mean"),
-            unique_customers=("customer_id", "nunique"),
+            total_revenue_usd=("total", "sum"),
+            avg_order_value_usd=("total", "mean"),
+            unique_customers=("user_id", "nunique"),
             cancelled_orders=("status", lambda s: (s == "CANCELLED").sum()),
         )
         .reset_index()

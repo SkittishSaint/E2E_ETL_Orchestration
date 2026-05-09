@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS CONTROL_DB.CONTROL.ETL_WATERMARKS (
 CREATE TABLE IF NOT EXISTS ETL_DB.RAW.ORDERS_RAW (
     order_id INT NOT NULL,
     user_id INT NOT NULL,
-    products_json VARIANT,
+    products_json VARCHAR(16777216),
     total DECIMAL(10,2),
     discounted_total DECIMAL(10,2),
     total_products INT,
@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS ETL_DB.RAW.ORDERS_RAW (
     sk_order VARCHAR(16),
     _transformed_at VARCHAR(255),
     _pipeline_version VARCHAR(10),
+    _extracted_at VARCHAR(255),
+    _source VARCHAR(500),
     _loaded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
 )
 CLUSTER BY (updated_at, order_id);
@@ -76,12 +78,14 @@ CREATE TABLE IF NOT EXISTS ETL_DB.RAW.USERS_RAW (
     address_city VARCHAR(100),
     address_state VARCHAR(50),
     address_postal_code VARCHAR(20),
-    address_lat DECIMAL(10,8),
-    address_lng DECIMAL(10,8),
+    address_lat DECIMAL(11,8),
+    address_lng DECIMAL(11,8),
     phone_masked VARCHAR(20),
     sk_user VARCHAR(16),
     _transformed_at VARCHAR(255),
     _pipeline_version VARCHAR(10),
+    _extracted_at VARCHAR(255),
+    _source VARCHAR(500),
     _loaded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
 )
 CLUSTER BY (user_id);
@@ -108,6 +112,8 @@ CREATE TABLE IF NOT EXISTS ETL_DB.RAW.PRODUCTS_RAW (
     sk_product VARCHAR(16),
     _transformed_at VARCHAR(255),
     _pipeline_version VARCHAR(10),
+    _extracted_at VARCHAR(255),
+    _source VARCHAR(500),
     _loaded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
 )
 CLUSTER BY (product_id, category);
