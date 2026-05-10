@@ -9,6 +9,7 @@ Handles all writes to Snowflake:
 """
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
@@ -54,6 +55,18 @@ class SnowflakeLoader:
         with self.conn.cursor() as cur:
             cur.execute(sql, params)
             logger.debug("Executed: %s", sql[:120])
+
+    def execute_script(self, sql: str) -> None:
+        """Execute a multi-statement SQL script."""
+        for statement in self.conn.execute_string(sql):
+            logger.debug("Executed statement: %s", statement.query[:120] if statement.query else "<unknown>")
+
+    def execute_sql_file(self, sql_file: str) -> None:
+        """Load and execute a SQL file from disk."""
+        sql_path = Path(sql_file)
+        sql = sql_path.read_text(encoding="utf-8")
+        logger.info("Executing Snowflake SQL file: %s", sql_path.name)
+        self.execute_script(sql)
 
     # ── Load strategies ───────────────────────────────────────────────────
     def load_truncate_replace(

@@ -26,9 +26,9 @@ SELECT DISTINCT
     product_name,
     price,
     category,
-    brand,
-    status,
-    is_active,
+    discount_percentage,
+    discounted_price,
+    stock,
     sk_product
 FROM STAGING.STG_PRODUCTS;
 

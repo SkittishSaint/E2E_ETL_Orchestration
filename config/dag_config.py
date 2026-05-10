@@ -3,9 +3,13 @@ config/dag_config.py
 ────────────────────
 Shared DAG default arguments and alert callbacks.
 """
+import logging
 import os
 from datetime import datetime, timedelta
 from airflow.utils.email import send_email
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Alert callback ────────────────────────────────────────────────────────
@@ -13,7 +17,7 @@ def on_failure_callback(context: dict) -> None:
     """Send an email alert on task failure."""
     dag_id = context["dag"].dag_id
     task_id = context["task_instance"].task_id
-    exec_date = context["execution_date"]
+    exec_date = context.get("logical_date") or context.get("execution_date")
     log_url = context["task_instance"].log_url
     exception = context.get("exception", "No exception details")
 
@@ -28,9 +32,12 @@ def on_failure_callback(context: dict) -> None:
     </table>
     <p><a href="{log_url}">View Logs</a></p>
     """
-    recipients = os.environ.get("ALERT_RECIPIENTS", "").split(",")
+    recipients = [email.strip() for email in os.environ.get("ALERT_RECIPIENTS", "").split(",") if email.strip()]
     if recipients:
-        send_email(to=recipients, subject=subject, html_content=body)
+        try:
+            send_email(to=recipients, subject=subject, html_content=body)
+        except Exception:
+            logger.exception("Failed to send Airflow failure email for DAG '%s', task '%s'.", dag_id, task_id)
 
 
 def on_success_callback(context: dict) -> None:

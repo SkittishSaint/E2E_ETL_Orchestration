@@ -44,7 +44,6 @@ import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.empty import EmptyOperator
-from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
 
 from config.dag_config import DEFAULT_ARGS, DAILY_SCHEDULE, PIPELINE_START_DATE, CATCHUP, TAGS
 from etl.extractors.api_extractor import extract_products, extract_users
@@ -54,7 +53,12 @@ from etl.transformers.transformer import (
     transform_products,
     transform_orders,
 )
-from etl.loaders.snowflake_loader import load_raw_orders, load_raw_users, load_raw_products
+from etl.loaders.snowflake_loader import (
+    SnowflakeLoader,
+    load_raw_orders,
+    load_raw_users,
+    load_raw_products,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +258,13 @@ def _log_load_metrics(**ctx):
     })
 
 
+def _run_snowflake_sql_file(sql_filename: str) -> None:
+    sql_path = os.path.join(SQL_DIR, sql_filename)
+    with SnowflakeLoader() as loader:
+        loader.execute_sql_file(sql_path)
+    logger.info("Completed Snowflake SQL script: %s", sql_filename)
+
+
 # def _build_daily_aggregations(**ctx):
 #     orders_df = pd.read_json(ctx["ti"].xcom_pull(key=XCOM_ORDERS))
 #     agg_df = build_daily_sales_agg(orders_df)
@@ -347,18 +358,16 @@ with DAG(
     )
 
     # ── SQL transformations via Snowflake operator ─────────────────────────
-    t_snowflake_staging = SnowflakeOperator(
+    t_snowflake_staging = PythonOperator(
         task_id="run_snowflake_staging_transforms",
-        snowflake_conn_id="snowflake_default",
-        sql="staging_transforms.sql",
-        autocommit=True,
+        python_callable=_run_snowflake_sql_file,
+        op_kwargs={"sql_filename": "staging_transforms.sql"},
     )
 
-    t_snowflake_analytics = SnowflakeOperator(
+    t_snowflake_analytics = PythonOperator(
         task_id="run_snowflake_analytics_transforms",
-        snowflake_conn_id="snowflake_default",
-        sql="analytics_transforms.sql",
-        autocommit=True,
+        python_callable=_run_snowflake_sql_file,
+        op_kwargs={"sql_filename": "analytics_transforms.sql"},
     )
 
     # ── Task dependency graph ──────────────────────────────────────────────

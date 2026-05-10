@@ -161,11 +161,20 @@ CREATE TABLE IF NOT EXISTS ETL_DB.STAGING.STG_PRODUCTS (
     sk_product VARCHAR(16) PRIMARY KEY,
     product_id INT NOT NULL,
     product_name VARCHAR(255),
+    description VARCHAR(2000),
+    rating DECIMAL(3,2),
+    reviews INT,
     category VARCHAR(100),
     price DECIMAL(10,2),
     discount_percentage DECIMAL(5,2),
-    net_price DECIMAL(10,2),
+    discounted_price DECIMAL(10,2),
     stock INT,
+    sku VARCHAR(100),
+    weight DECIMAL(10,2),
+    dimensions VARCHAR(255),
+    return_policy VARCHAR(500),
+    _transformed_at VARCHAR(255),
+    _pipeline_version VARCHAR(10),
     dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
     dbt_valid_from TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
     dbt_valid_to TIMESTAMP_TZ
@@ -200,7 +209,9 @@ CREATE TABLE IF NOT EXISTS ETL_DB.ANALYTICS.DIM_PRODUCTS (
     product_name VARCHAR(255),
     category VARCHAR(100),
     price DECIMAL(10,2),
-    is_active BOOLEAN DEFAULT TRUE,
+    discount_percentage DECIMAL(5,2),
+    discounted_price DECIMAL(10,2),
+    stock INT,
     dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
 )
 CLUSTER BY (category);
