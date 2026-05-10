@@ -75,4 +75,4 @@ class SnowflakeTargets:
     AGG_DAILY_SALES = "ANALYTICS.AGG_DAILY_SALES"
 
     # Watermark table for incremental loads
-    WATERMARK_TABLE = "CONTROL.ETL_WATERMARKS"
+    WATERMARK_TABLE = "CONTROL_DB.CONTROL.ETL_WATERMARKS"

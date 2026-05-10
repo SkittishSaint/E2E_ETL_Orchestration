@@ -36,20 +36,23 @@ sys.path.append('/opt/airflow')
 
 import pandas as pd
 from airflow import DAG
-from airflow.operators.python import PythonOperator, ShortCircuitOperator
+from airflow.operators.python import PythonOperator
 from airflow.operators.empty import EmptyOperator
 
 from config.dag_config import DEFAULT_ARGS, HOURLY_SCHEDULE, PIPELINE_START_DATE, CATCHUP, TAGS
 from etl.extractors.api_extractor import extract_products, extract_users
 from etl.extractors.db_extractor import extract_orders
 from etl.transformers.transformer import transform_products, transform_users, transform_orders
-from etl.loaders.snowflake_loader import SnowflakeLoader, load_raw_products, load_raw_users, load_raw_orders
+from etl.loaders.snowflake_loader import SnowflakeLoader, upsert_raw_products, load_raw_users, load_raw_orders
 
 logger = logging.getLogger(__name__)
 
 PIPELINE_PRODUCTS = "incremental_products"
 PIPELINE_USERS    = "incremental_users"
 PIPELINE_ORDERS   = "incremental_orders"
+XCOM_PRODUCTS_WATERMARK = "products_next_watermark"
+XCOM_USERS_WATERMARK = "users_next_watermark"
+XCOM_ORDERS_WATERMARK = "orders_next_watermark"
 
 
 def _normalize_xcom_df(df: pd.DataFrame):
@@ -116,6 +119,15 @@ def _deserialize_xcom_df(payload):
     return pd.DataFrame(payload)
 
 
+def _max_timestamp_value(df: pd.DataFrame, candidates) -> str:
+    for col in candidates:
+        if col in df.columns:
+            series = pd.to_datetime(df[col], utc=True, errors="coerce").dropna()
+            if not series.empty:
+                return series.max().isoformat()
+    return None
+
+
 # ── Watermark helpers ─────────────────────────────────────────────────────
 
 def _get_watermarks(**ctx):
@@ -134,18 +146,42 @@ def _get_watermarks(**ctx):
 
 
 def _update_watermarks(**ctx):
-    now = datetime.now(timezone.utc)
     products_rows = int(ctx["ti"].xcom_pull(key="products_rows_loaded") or 0)
     users_rows    = int(ctx["ti"].xcom_pull(key="users_rows_loaded") or 0)
     orders_rows   = int(ctx["ti"].xcom_pull(key="orders_rows_loaded") or 0)
+    products_wm = ctx["ti"].xcom_pull(key=XCOM_PRODUCTS_WATERMARK)
+    users_wm = ctx["ti"].xcom_pull(key=XCOM_USERS_WATERMARK)
+    orders_wm = ctx["ti"].xcom_pull(key=XCOM_ORDERS_WATERMARK)
+
+    updates = []
 
     with SnowflakeLoader() as loader:
-        loader.set_watermark(PIPELINE_PRODUCTS, now, rows_loaded=products_rows)
-        loader.set_watermark(PIPELINE_USERS,    now, rows_loaded=users_rows)
-        loader.set_watermark(PIPELINE_ORDERS,   now, rows_loaded=orders_rows)
+        if products_rows > 0 and products_wm:
+            loader.set_watermark(
+                PIPELINE_PRODUCTS,
+                datetime.fromisoformat(products_wm),
+                rows_loaded=products_rows,
+            )
+            updates.append(f"products={products_wm}")
+        if users_rows > 0 and users_wm:
+            loader.set_watermark(
+                PIPELINE_USERS,
+                datetime.fromisoformat(users_wm),
+                rows_loaded=users_rows,
+            )
+            updates.append(f"users={users_wm}")
+        if orders_rows > 0 and orders_wm:
+            loader.set_watermark(
+                PIPELINE_ORDERS,
+                datetime.fromisoformat(orders_wm),
+                rows_loaded=orders_rows,
+            )
+            updates.append(f"orders={orders_wm}")
 
-    logger.info("Watermarks updated to %s (products: %d rows, users: %d rows, orders: %d rows)",
-                now, products_rows, users_rows, orders_rows)
+    if updates:
+        logger.info("Updated incremental watermarks: %s", ", ".join(updates))
+    else:
+        logger.info("No branch produced new rows; watermarks unchanged.")
 
 
 # ── Extract ───────────────────────────────────────────────────────────────
@@ -155,8 +191,13 @@ def _incremental_extract_products(**ctx):
     since  = datetime.fromisoformat(wm_str) if wm_str else None
     df     = extract_products(since=since)
     ctx["ti"].xcom_push(key="products_raw", value=_normalize_xcom_df(df))
+    ctx["ti"].xcom_push(key=XCOM_PRODUCTS_WATERMARK, value=_max_timestamp_value(df, ["updated_at", "_extracted_at"]))
     logger.info("Incremental extract: %d products (since %s)", len(df), since)
-    return len(df) > 0   # ShortCircuit: skip rest if nothing new
+    if since is not None:
+        logger.warning(
+            "Products incremental mode relies on source-side filtering support; "
+            "if the API ignores 'updated_since', this branch behaves like a full pull."
+        )
 
 
 def _incremental_extract_users(**ctx):
@@ -164,8 +205,13 @@ def _incremental_extract_users(**ctx):
     since  = datetime.fromisoformat(wm_str) if wm_str else None
     df     = extract_users(since=since)
     ctx["ti"].xcom_push(key="users_raw", value=_normalize_xcom_df(df))
+    ctx["ti"].xcom_push(key=XCOM_USERS_WATERMARK, value=_max_timestamp_value(df, ["updated_at", "_extracted_at"]))
     logger.info("Incremental extract: %d users (since %s)", len(df), since)
-    return len(df) > 0
+    if since is not None:
+        logger.warning(
+            "Users incremental mode relies on source-side filtering support; "
+            "if the API ignores 'updated_since', this branch behaves like a full pull."
+        )
 
 
 def _incremental_extract_orders(**ctx):
@@ -173,24 +219,36 @@ def _incremental_extract_orders(**ctx):
     since  = datetime.fromisoformat(wm_str) if wm_str else None
     df     = extract_orders(watermark=since)
     ctx["ti"].xcom_push(key="orders_raw", value=_normalize_xcom_df(df))
+    ctx["ti"].xcom_push(key=XCOM_ORDERS_WATERMARK, value=_max_timestamp_value(df, ["updated_at", "created_at", "_extracted_at"]))
     logger.info("Incremental extract: %d orders (since %s)", len(df), since)
-    return len(df) > 0
 
 
 # ── Transform ─────────────────────────────────────────────────────────────
 
 def _transform_products(**ctx):
     raw = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="products_raw"))
+    if raw.empty:
+        logger.info("No product rows extracted; skipping product transform.")
+        ctx["ti"].xcom_push(key="products_transformed", value=[])
+        return
     ctx["ti"].xcom_push(key="products_transformed", value=_normalize_xcom_df(transform_products(raw)))
 
 
 def _transform_users(**ctx):
     raw = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="users_raw"))
+    if raw.empty:
+        logger.info("No user rows extracted; skipping user transform.")
+        ctx["ti"].xcom_push(key="users_transformed", value=[])
+        return
     ctx["ti"].xcom_push(key="users_transformed", value=_normalize_xcom_df(transform_users(raw)))
 
 
 def _transform_orders(**ctx):
     raw = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="orders_raw"))
+    if raw.empty:
+        logger.info("No order rows extracted; skipping order transform.")
+        ctx["ti"].xcom_push(key="orders_transformed", value=[])
+        return
     ctx["ti"].xcom_push(key="orders_transformed", value=_normalize_xcom_df(transform_orders(raw)))
 
 
@@ -198,7 +256,7 @@ def _transform_orders(**ctx):
 
 def _upsert_products(**ctx):
     df   = _deserialize_xcom_df(ctx["ti"].xcom_pull(key="products_transformed"))
-    rows = load_raw_products(df)
+    rows = upsert_raw_products(df)
     ctx["ti"].xcom_push(key="products_rows_loaded", value=rows)
     logger.info("Upserted %d products", rows)
 
@@ -233,7 +291,7 @@ def _validate_incremental_loads(**ctx):
         raise ValueError("Incremental load returned invalid row counts")
 
     if products_rows == 0 and users_rows == 0 and orders_rows == 0:
-        logger.warning("No incremental rows loaded in this run; no watermark update will occur.")
+        logger.warning("No incremental rows loaded in this run; watermarks will remain unchanged.")
 
     ctx["ti"].xcom_push(key="incremental_validation_passed", value=True)
 
@@ -261,16 +319,15 @@ with DAG(
         python_callable=_get_watermarks,
     )
 
-    # ShortCircuitOperator skips downstream tasks if no new records
-    t_extract_products = ShortCircuitOperator(
+    t_extract_products = PythonOperator(
         task_id="incremental_extract_products",
         python_callable=_incremental_extract_products,
     )
-    t_extract_users = ShortCircuitOperator(
+    t_extract_users = PythonOperator(
         task_id="incremental_extract_users",
         python_callable=_incremental_extract_users,
     )
-    t_extract_orders = ShortCircuitOperator(
+    t_extract_orders = PythonOperator(
         task_id="incremental_extract_orders",
         python_callable=_incremental_extract_orders,
     )
@@ -292,7 +349,6 @@ with DAG(
     t_validate_incremental_loads = PythonOperator(
         task_id="validate_incremental_loads",
         python_callable=_validate_incremental_loads,
-        trigger_rule="none_failed",
     )
 
     # ── Dependency graph ───────────────────────────────────────────────────

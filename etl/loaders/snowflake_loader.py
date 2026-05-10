@@ -240,3 +240,14 @@ def load_raw_products(df: pd.DataFrame) -> int:
             table=SnowflakeTargets.RAW_PRODUCTS,
             schema="RAW",
         )
+
+
+def upsert_raw_products(df: pd.DataFrame) -> int:
+    with SnowflakeLoader() as loader:
+        return loader.load_upsert(
+            df=df,
+            target_table=SnowflakeTargets.RAW_PRODUCTS,
+            staging_table="RAW.PRODUCTS_STAGING_TMP",
+            merge_keys=["product_id"],
+            schema="RAW",
+        )
