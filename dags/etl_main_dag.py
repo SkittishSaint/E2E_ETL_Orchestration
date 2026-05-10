@@ -279,6 +279,7 @@ with DAG(
     catchup=CATCHUP,
     max_active_runs=1,
     tags=TAGS,
+    template_searchpath=[SQL_DIR],
     doc_md=__doc__,
 ) as dag:
 
@@ -349,14 +350,14 @@ with DAG(
     t_snowflake_staging = SnowflakeOperator(
         task_id="run_snowflake_staging_transforms",
         snowflake_conn_id="snowflake_default",
-        sql=os.path.join(SQL_DIR, "staging_transforms.sql"),
+        sql="staging_transforms.sql",
         autocommit=True,
     )
 
     t_snowflake_analytics = SnowflakeOperator(
         task_id="run_snowflake_analytics_transforms",
         snowflake_conn_id="snowflake_default",
-        sql=os.path.join(SQL_DIR, "analytics_transforms.sql"),
+        sql="analytics_transforms.sql",
         autocommit=True,
     )
 
