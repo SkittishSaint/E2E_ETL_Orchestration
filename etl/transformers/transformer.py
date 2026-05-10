@@ -6,6 +6,7 @@ Each transform function takes a raw DataFrame and returns
 a cleaned, enriched, schema-aligned DataFrame ready for Snowflake.
 """
 import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -222,12 +223,31 @@ def transform_products(df: pd.DataFrame) -> pd.DataFrame:
         df["product_name"] = df["title"]
 
     if "rating" in df.columns:
-        df["rating_rate"] = pd.to_numeric(df["rating"], errors="coerce")
-        df["rating_count"] = None
-        df.drop(columns=["rating"], inplace=True)
+        df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+
+    if "reviews" in df.columns:
+        def _normalize_reviews(value):
+            if isinstance(value, (list, tuple)):
+                return len(value)
+            if isinstance(value, dict):
+                return 1
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, (list, tuple)):
+                        return len(parsed)
+                    if isinstance(parsed, dict):
+                        return 1
+                except (ValueError, TypeError):
+                    pass
+            return pd.to_numeric(value, errors="coerce")
+
+        df["reviews"] = df["reviews"].apply(_normalize_reviews).fillna(0).astype(int)
 
     if "discountPercentage" in df.columns:
-        df["discount_pct"] = pd.to_numeric(df["discountPercentage"], errors="coerce")
+        df["discount_percentage"] = pd.to_numeric(df["discountPercentage"], errors="coerce")
+    if "discountedPrice" in df.columns and "discounted_price" not in df.columns:
+        df["discounted_price"] = pd.to_numeric(df["discountedPrice"], errors="coerce")
 
     df = df.dropna(subset=["product_id", "product_name"])
 
@@ -253,6 +273,16 @@ def transform_products(df: pd.DataFrame) -> pd.DataFrame:
     df["sk_product"] = df["product_id"].apply(lambda x: _hash_pk("product", x))
     df["_transformed_at"] = _now_utc()
     df["_pipeline_version"] = "1.0"
+
+    # Select only columns that match the PRODUCTS_RAW schema to avoid passing
+    # API-specific or unexpected columns into Snowflake.
+    schema_columns = [
+        'id', 'product_id', 'product_name', 'description', 'rating', 'reviews', 'price',
+        'discount_percentage', 'discounted_price', 'stock', 'category', 'thumbnail', 'sku',
+        'weight', 'dimensions', 'warranty_months', 'return_policy', 'sk_product',
+        '_transformed_at', '_pipeline_version', '_extracted_at', '_source'
+    ]
+    df = df[[col for col in schema_columns if col in df.columns]]
 
     logger.info("Transform complete — output rows: %d", len(df))
     return df.reset_index(drop=True)
