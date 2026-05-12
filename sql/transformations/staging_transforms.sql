@@ -42,6 +42,7 @@ SELECT
     sku,
     weight,
     dimensions,
+    warranty_months,
     return_policy,
     sk_product,
     _transformed_at,

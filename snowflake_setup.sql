@@ -37,6 +37,20 @@ CREATE TABLE IF NOT EXISTS CONTROL_DB.CONTROL.ETL_WATERMARKS (
     PRIMARY KEY (pipeline_name, recorded_at)
 );
 
+-- Pipeline run metrics table for monitoring and performance reporting
+CREATE TABLE IF NOT EXISTS CONTROL_DB.CONTROL.PIPELINE_RUN_METRICS (
+    dag_id VARCHAR(255) NOT NULL,
+    task_id VARCHAR(255),
+    run_id VARCHAR(500),
+    run_type VARCHAR(100),
+    status VARCHAR(50),
+    rows_loaded INT DEFAULT 0,
+    duration_seconds FLOAT,
+    error_message VARCHAR(5000),
+    recorded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
+)
+CLUSTER BY (dag_id, recorded_at);
+
 -- ============================================================================
 -- PART 3: Create RAW Layer Tables (Ingested Data)
 -- ============================================================================
@@ -124,62 +138,65 @@ CLUSTER BY (product_id, category);
 
 -- Staging orders table
 CREATE TABLE IF NOT EXISTS ETL_DB.STAGING.STG_ORDERS (
-    sk_order VARCHAR(16) PRIMARY KEY,
     order_id INT NOT NULL,
     user_id INT NOT NULL,
-    total_amount DECIMAL(10,2),
-    discount_amount DECIMAL(10,2),
-    net_amount DECIMAL(10,2),
-    product_count INT,
+    products_json VARCHAR(16777216),
+    total DECIMAL(10,2),
+    discounted_total DECIMAL(10,2),
+    total_products INT,
     total_quantity INT,
-    order_date DATE,
-    created_at TIMESTAMP_TZ,
+    order_date TIMESTAMP_TZ,
     updated_at TIMESTAMP_TZ,
-    dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
-    dbt_valid_from TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
-    dbt_valid_to TIMESTAMP_TZ
+    sk_order VARCHAR(16),
+    _transformed_at VARCHAR(255),
+    _pipeline_version VARCHAR(10)
 )
-CLUSTER BY (order_date, user_id);
+CLUSTER BY (order_date);
 
 -- Staging users table
 CREATE TABLE IF NOT EXISTS ETL_DB.STAGING.STG_USERS (
-    sk_user VARCHAR(16) PRIMARY KEY,
     user_id INT NOT NULL,
     email VARCHAR(255),
     username VARCHAR(255),
+    password_masked VARCHAR(255),
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
     full_name VARCHAR(255),
-    city VARCHAR(100),
-    state VARCHAR(50),
-    dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
-    dbt_valid_from TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
-    dbt_valid_to TIMESTAMP_TZ
+    address_line1 VARCHAR(255),
+    address_city VARCHAR(100),
+    address_state VARCHAR(50),
+    address_postal_code VARCHAR(20),
+    address_lat DECIMAL(11,8),
+    address_lng DECIMAL(11,8),
+    phone_masked VARCHAR(20),
+    sk_user VARCHAR(16),
+    _transformed_at VARCHAR(255),
+    _pipeline_version VARCHAR(10)
 )
 CLUSTER BY (user_id);
 
 -- Staging products table
 CREATE TABLE IF NOT EXISTS ETL_DB.STAGING.STG_PRODUCTS (
-    sk_product VARCHAR(16) PRIMARY KEY,
     product_id INT NOT NULL,
     product_name VARCHAR(255),
     description VARCHAR(2000),
     rating DECIMAL(3,2),
     reviews INT,
-    category VARCHAR(100),
     price DECIMAL(10,2),
     discount_percentage DECIMAL(5,2),
     discounted_price DECIMAL(10,2),
     stock INT,
+    category VARCHAR(100),
     sku VARCHAR(100),
     weight DECIMAL(10,2),
     dimensions VARCHAR(255),
+    warranty_months INT,
     return_policy VARCHAR(500),
+    sk_product VARCHAR(16),
     _transformed_at VARCHAR(255),
-    _pipeline_version VARCHAR(10),
-    dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
-    dbt_valid_from TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
-    dbt_valid_to TIMESTAMP_TZ
+    _pipeline_version VARCHAR(10)
 )
-CLUSTER BY (category, product_id);
+CLUSTER BY (product_id);
 
 -- ============================================================================
 -- PART 5: Create ANALYTICS Layer Tables (For Reporting)
@@ -187,62 +204,55 @@ CLUSTER BY (category, product_id);
 
 -- Dimension: Customers
 CREATE TABLE IF NOT EXISTS ETL_DB.ANALYTICS.DIM_CUSTOMERS (
-    dim_customer_id INT PRIMARY KEY,
     user_id INT NOT NULL,
     email VARCHAR(255),
+    username VARCHAR(255),
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
     full_name VARCHAR(255),
-    city VARCHAR(100),
-    state VARCHAR(50),
-    total_orders INT DEFAULT 0,
-    total_spent DECIMAL(12,2) DEFAULT 0,
-    first_order_date DATE,
-    last_order_date DATE,
-    is_active BOOLEAN DEFAULT TRUE,
-    dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
+    address_city VARCHAR(100),
+    address_state VARCHAR(50),
+    address_postal_code VARCHAR(20),
+    sk_user VARCHAR(16)
 )
 CLUSTER BY (user_id);
 
 -- Dimension: Products
 CREATE TABLE IF NOT EXISTS ETL_DB.ANALYTICS.DIM_PRODUCTS (
-    dim_product_id INT PRIMARY KEY,
     product_id INT NOT NULL,
     product_name VARCHAR(255),
-    category VARCHAR(100),
     price DECIMAL(10,2),
+    category VARCHAR(100),
     discount_percentage DECIMAL(5,2),
     discounted_price DECIMAL(10,2),
     stock INT,
-    dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
+    warranty_months INT,
+    sk_product VARCHAR(16)
 )
-CLUSTER BY (category);
+CLUSTER BY (product_id);
 
 -- Fact: Orders
 CREATE TABLE IF NOT EXISTS ETL_DB.ANALYTICS.FACT_ORDERS (
-    fact_order_id INT PRIMARY KEY,
     order_id INT NOT NULL,
-    dim_customer_id INT,
-    dim_product_id INT,
-    order_date DATE,
-    order_amount DECIMAL(12,2),
-    discount_amount DECIMAL(10,2),
-    net_amount DECIMAL(12,2),
-    quantity INT,
-    FOREIGN KEY (dim_customer_id) REFERENCES ETL_DB.ANALYTICS.DIM_CUSTOMERS(dim_customer_id),
-    FOREIGN KEY (dim_product_id) REFERENCES ETL_DB.ANALYTICS.DIM_PRODUCTS(dim_product_id)
+    user_id INT,
+    products_json VARCHAR(16777216),
+    total DECIMAL(10,2),
+    discounted_total DECIMAL(10,2),
+    total_products INT,
+    total_quantity INT,
+    order_date TIMESTAMP_TZ,
+    updated_at TIMESTAMP_TZ,
+    sk_order VARCHAR(16)
 )
-CLUSTER BY (order_date, dim_customer_id);
+CLUSTER BY (order_date);
 
 -- Aggregation: Daily Sales
 CREATE TABLE IF NOT EXISTS ETL_DB.ANALYTICS.AGG_DAILY_SALES (
-    sale_date DATE PRIMARY KEY,
-    total_orders INT,
-    total_customers INT,
-    total_amount DECIMAL(12,2),
-    avg_order_value DECIMAL(10,2),
-    total_discount DECIMAL(10,2),
-    cancelled_orders INT,
-    cancellation_rate_pct DECIMAL(5,2),
-    dbt_updated_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
+    sale_date DATE,
+    order_count INT,
+    total_revenue_usd DECIMAL(12,2),
+    avg_order_value_usd DECIMAL(12,2),
+    unique_customers INT
 )
 CLUSTER BY (sale_date);
 
@@ -275,11 +285,30 @@ GRANT USAGE ON SCHEMA ETL_DB.STAGING TO ROLE ETL_ROLE;
 GRANT USAGE ON SCHEMA ETL_DB.ANALYTICS TO ROLE ETL_ROLE;
 GRANT USAGE ON SCHEMA CONTROL_DB.CONTROL TO ROLE ETL_ROLE;
 
+-- Grant object creation privileges required by write_pandas staging, MERGE upserts,
+-- and CREATE OR REPLACE TABLE transformation scripts.
+GRANT CREATE TABLE ON SCHEMA ETL_DB.RAW TO ROLE ETL_ROLE;
+GRANT CREATE STAGE ON SCHEMA ETL_DB.RAW TO ROLE ETL_ROLE;
+GRANT CREATE FILE FORMAT ON SCHEMA ETL_DB.RAW TO ROLE ETL_ROLE;
+GRANT CREATE TABLE ON SCHEMA ETL_DB.STAGING TO ROLE ETL_ROLE;
+GRANT CREATE TABLE ON SCHEMA ETL_DB.ANALYTICS TO ROLE ETL_ROLE;
+GRANT CREATE TABLE ON SCHEMA CONTROL_DB.CONTROL TO ROLE ETL_ROLE;
+
 -- Grant table permissions
 GRANT ALL ON ALL TABLES IN SCHEMA ETL_DB.RAW TO ROLE ETL_ROLE;
 GRANT ALL ON ALL TABLES IN SCHEMA ETL_DB.STAGING TO ROLE ETL_ROLE;
+GRANT ALL ON ALL TABLES IN SCHEMA ETL_DB.ANALYTICS TO ROLE ETL_ROLE;
 GRANT ALL ON ALL TABLES IN SCHEMA CONTROL_DB.CONTROL TO ROLE ETL_ROLE;
-GRANT SELECT ON ALL TABLES IN SCHEMA ETL_DB.ANALYTICS TO ROLE ETL_ROLE;
+
+-- Keep grants available for objects created or replaced by the ETL role.
+GRANT ALL ON FUTURE TABLES IN SCHEMA ETL_DB.RAW TO ROLE ETL_ROLE;
+GRANT ALL ON FUTURE TABLES IN SCHEMA ETL_DB.STAGING TO ROLE ETL_ROLE;
+GRANT ALL ON FUTURE TABLES IN SCHEMA ETL_DB.ANALYTICS TO ROLE ETL_ROLE;
+GRANT ALL ON FUTURE TABLES IN SCHEMA CONTROL_DB.CONTROL TO ROLE ETL_ROLE;
+
+-- Transfer ownership of setup-time tables that ETL_ROLE replaces during runs.
+GRANT OWNERSHIP ON ALL TABLES IN SCHEMA ETL_DB.STAGING TO ROLE ETL_ROLE COPY CURRENT GRANTS;
+GRANT OWNERSHIP ON ALL TABLES IN SCHEMA ETL_DB.ANALYTICS TO ROLE ETL_ROLE COPY CURRENT GRANTS;
 
 -- Create warehouse
 CREATE WAREHOUSE IF NOT EXISTS ETL_WH
@@ -313,7 +342,8 @@ SHOW TABLES IN CONTROL_DB.CONTROL;
 -- 2. Ensure you have ACCOUNTADMIN or similar privileges to create databases
 -- 3. Run this once to set up the initial schema
 -- 4. Clustering keys are set for optimal query performance
--- 5. Update Airflow connection with these credentials:
+-- 5. CONTROL_DB.CONTROL.PIPELINE_RUN_METRICS stores pipeline performance and failure metrics
+-- 6. Update Airflow connection with these credentials:
 --    - Account: your_account_id
 --    - User: your_username
 --    - Password: your_password

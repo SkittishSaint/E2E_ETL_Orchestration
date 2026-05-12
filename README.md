@@ -14,6 +14,7 @@ layers for reporting.
 - Data quality validation before raw loads
 - Snowflake SQL transformation scripts with clustering keys
 - Retry, timeout, logging, and failure callback handling in Airflow
+- Persisted pipeline monitoring and performance metrics in Snowflake
 
 ## Architecture
 
@@ -105,6 +106,7 @@ sql/
   transformations/
 monitoring/
 docker-compose.yml
+requirements.txt
 snowflake_setup.sql
 setup_sample_database.py
 ORDERS_README.md
@@ -124,6 +126,9 @@ This starts:
 - Airflow webserver
 - Airflow scheduler
 - Airflow init job
+
+The Airflow containers install the runtime packages listed in
+`requirements.txt` through `_PIP_ADDITIONAL_REQUIREMENTS`.
 
 ### 2. Configure environment variables
 
@@ -164,6 +169,7 @@ This script creates:
 - Databases and schemas
 - Raw / staging / analytics tables
 - Control watermark table
+- Pipeline run metrics table
 - Warehouse
 - Role grants
 
@@ -184,7 +190,7 @@ python setup_sample_database.py
 Shared DAG defaults are defined in `config/dag_config.py`.
 
 Included controls:
-- `retries = 0`
+- `retries = 2`
 - `retry_exponential_backoff = True`
 - `max_retry_delay = 60 minutes`
 - `execution_timeout = 2 hours`
@@ -210,7 +216,9 @@ Implemented monitoring today:
 - Airflow task logs
 - raw load row-count metrics in the main DAG
 - incremental row-count metrics in the hourly DAG
-- failure callback logging in `config/dag_config.py`
+- successful run metrics in `CONTROL_DB.CONTROL.PIPELINE_RUN_METRICS`
+- failure records from the shared callback in `config/dag_config.py`
+- reusable monitoring helpers in `monitoring/pipeline_monitor.py`
 
 Current limitation:
 - SMTP alert delivery is configured but may still require valid reachable SMTP
@@ -230,16 +238,17 @@ Optimization choices already applied:
 - warehouse grants
 - schema usage grants
 - table privileges for raw, staging, analytics, and control schemas
+- create privileges for Snowflake staging tables, file formats, and metrics
 
 ## Known Limitations
 
 - API incrementality depends on whether the upstream source truly honors the
   `updated_since` filter; if it does not, those API branches behave like
   idempotent full pulls with upsert protection.
-- The `monitoring/` directory is mounted into Airflow, but a richer monitoring
-  module or dashboard-backed metrics store is not yet implemented.
 - The failure callback is hardened against SMTP errors, but successful email
   delivery still depends on working SMTP connectivity.
+- A dashboard over `PIPELINE_RUN_METRICS` can be added later, but the metrics
+  store needed for project evidence is implemented.
 
 ## Evidence of Completion
 

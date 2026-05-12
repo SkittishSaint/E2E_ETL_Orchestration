@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ── Alert callback ────────────────────────────────────────────────────────
 def on_failure_callback(context: dict) -> None:
-    """Send an email alert on task failure."""
+    """Send an email alert and record a monitoring event on task failure."""
     dag_id = context["dag"].dag_id
     task_id = context["task_instance"].task_id
     exec_date = context.get("logical_date") or context.get("execution_date")
@@ -39,10 +39,17 @@ def on_failure_callback(context: dict) -> None:
         except Exception:
             logger.exception("Failed to send Airflow failure email for DAG '%s', task '%s'.", dag_id, task_id)
 
+    try:
+        from monitoring.pipeline_monitor import record_task_failure
+
+        record_task_failure(context)
+    except Exception:
+        logger.exception("Failed to record Airflow failure metric for DAG '%s', task '%s'.", dag_id, task_id)
+
 
 def on_success_callback(context: dict) -> None:
     """Optional: log pipeline completion to a monitoring table."""
-    pass  # Extended in monitoring/pipeline_monitor.py
+    pass
 
 
 # ── Default args shared across all DAGs ──────────────────────────────────
@@ -51,7 +58,7 @@ DEFAULT_ARGS = {
     "depends_on_past": False,
     "email_on_failure": True,
     "email_on_retry": False,
-    "retries": 0,
+    "retries": 2,
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=60),

@@ -1,0 +1,129 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.0
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: "${_PIP_ADDITIONAL_REQUIREMENTS:-pandas numpy requests python-dotenv psycopg2-binary snowflake-connector-python[pandas] python-docx}"
+    # Snowflake connection (override via .env)
+    SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+    SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+    SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-ETL_DB}
+    SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-ETL_WH}
+    SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:-RAW}
+    SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE:-ETL_ROLE}
+    AIRFLOW_CONN_SNOWFLAKE_DEFAULT: "snowflake://${SNOWFLAKE_USER}:${SNOWFLAKE_PASSWORD}@${SNOWFLAKE_ACCOUNT}/${SNOWFLAKE_DATABASE:-ETL_DB}/${SNOWFLAKE_SCHEMA:-RAW}?warehouse=${SNOWFLAKE_WAREHOUSE:-ETL_WH}&role=${SNOWFLAKE_ROLE:-ETL_ROLE}"
+    # API Keys
+    API_KEY: ${API_KEY}
+    API_BASE_URL: ${API_BASE_URL:-https://dummyjson.com}
+    SOURCE_DB_CONN: ${SOURCE_DB_CONN}
+    # Email alerts
+    ALERT_EMAIL: ${ALERT_EMAIL}
+    ALERT_EMAIL_PASSWORD: ${ALERT_EMAIL_PASSWORD}
+    ALERT_RECIPIENTS: ${ALERT_RECIPIENTS:-sridharsahu456@yahoo.com}
+    AIRFLOW__SMTP__SMTP_PORT: 587
+    AIRFLOW__SMTP__SMTP_USER: ${ALERT_EMAIL}
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${ALERT_EMAIL_PASSWORD}
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${ALERT_EMAIL}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./sql:/opt/airflow/sql
+    - ./etl:/opt/airflow/etl
+    - ./config:/opt/airflow/config
+    - ./monitoring:/opt/airflow/monitoring
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    ports:
+      - "5432:5432"
+
+  ecommerce-db:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ecommerce
+    volumes:
+      - ecommerce-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    ports:
+      - "5433:5432"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init
+        airflow db upgrade
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin
+        echo "Airflow initialized successfully"
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+
+volumes:
+  postgres-db-volume:
+  ecommerce-db-volume:

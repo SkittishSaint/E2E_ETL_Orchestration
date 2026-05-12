@@ -29,6 +29,7 @@ SELECT DISTINCT
     discount_percentage,
     discounted_price,
     stock,
+    warranty_months,
     sk_product
 FROM STAGING.STG_PRODUCTS;
 

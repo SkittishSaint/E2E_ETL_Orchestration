@@ -29,6 +29,17 @@ def _hash_pk(*values) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def _to_json_string(value) -> Optional[str]:
+    """Serialize nested source values so Snowflake receives VARCHAR-safe data."""
+    if value is None:
+        return None
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, default=str)
+
+
 def cast_timestamps(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     for col in cols:
         if col in df.columns:
@@ -73,7 +84,7 @@ def transform_orders(df: pd.DataFrame) -> pd.DataFrame:
 
     # Handle products - store as JSON string
     if 'products' in df.columns:
-        df['products_json'] = df['products'].astype(str)
+        df['products_json'] = df['products'].apply(_to_json_string)
         df = df.drop(columns=['products'])
 
     # Required field guard
@@ -248,6 +259,18 @@ def transform_products(df: pd.DataFrame) -> pd.DataFrame:
         df["discount_percentage"] = pd.to_numeric(df["discountPercentage"], errors="coerce")
     if "discountedPrice" in df.columns and "discounted_price" not in df.columns:
         df["discounted_price"] = pd.to_numeric(df["discountedPrice"], errors="coerce")
+    if "returnPolicy" in df.columns and "return_policy" not in df.columns:
+        df["return_policy"] = df["returnPolicy"].astype(str).str.strip()
+    if "warrantyInformation" in df.columns and "warranty_months" not in df.columns:
+        df["warranty_months"] = (
+            pd.to_numeric(
+                df["warrantyInformation"].astype(str).str.extract(r"(\d+)", expand=False),
+                errors="coerce",
+            )
+            .astype("Int64")
+        )
+    if "dimensions" in df.columns:
+        df["dimensions"] = df["dimensions"].apply(_to_json_string)
 
     df = df.dropna(subset=["product_id", "product_name"])
 

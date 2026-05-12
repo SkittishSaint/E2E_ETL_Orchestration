@@ -59,6 +59,7 @@ from etl.loaders.snowflake_loader import (
     load_raw_users,
     load_raw_products,
 )
+from monitoring.pipeline_monitor import duration_seconds_from_context, record_pipeline_metric
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,24 @@ def _log_load_metrics(**ctx):
     })
 
 
+def _persist_pipeline_metrics(**ctx):
+    metrics = ctx["ti"].xcom_pull(
+        key="raw_load_metrics",
+        task_ids="log_load_metrics",
+    ) or {}
+    rows_loaded = sum(int(metrics.get(name) or 0) for name in ("orders", "users", "products"))
+
+    record_pipeline_metric(
+        dag_id=ctx["dag"].dag_id,
+        task_id=ctx["ti"].task_id,
+        run_id=ctx["run_id"],
+        run_type="daily_full",
+        status="SUCCESS",
+        rows_loaded=rows_loaded,
+        duration_seconds=duration_seconds_from_context(ctx),
+    )
+
+
 def _run_snowflake_sql_file(sql_filename: str) -> None:
     sql_path = os.path.join(SQL_DIR, sql_filename)
     with SnowflakeLoader() as loader:
@@ -370,6 +389,11 @@ with DAG(
         op_kwargs={"sql_filename": "analytics_transforms.sql"},
     )
 
+    t_persist_pipeline_metrics = PythonOperator(
+        task_id="persist_pipeline_metrics",
+        python_callable=_persist_pipeline_metrics,
+    )
+
     # ── Task dependency graph ──────────────────────────────────────────────
     start >> [t_extract_products, t_extract_users, t_extract_orders]
 
@@ -377,4 +401,4 @@ with DAG(
     t_extract_users     >> t_transform_users     >> t_validate_users    >> t_load_users
     t_extract_orders    >> t_transform_orders    >> t_validate_orders   >> t_load_orders
 
-    [t_load_orders, t_load_users, t_load_products] >> t_log_load_metrics >> t_snowflake_staging >> t_snowflake_analytics >> end
+    [t_load_orders, t_load_users, t_load_products] >> t_log_load_metrics >> t_snowflake_staging >> t_snowflake_analytics >> t_persist_pipeline_metrics >> end

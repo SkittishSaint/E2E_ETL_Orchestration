@@ -44,6 +44,7 @@ from etl.extractors.api_extractor import extract_products, extract_users
 from etl.extractors.db_extractor import extract_orders
 from etl.transformers.transformer import transform_products, transform_users, transform_orders
 from etl.loaders.snowflake_loader import SnowflakeLoader, upsert_raw_products, load_raw_users, load_raw_orders
+from monitoring.pipeline_monitor import duration_seconds_from_context, record_pipeline_metric
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +297,22 @@ def _validate_incremental_loads(**ctx):
     ctx["ti"].xcom_push(key="incremental_validation_passed", value=True)
 
 
+def _persist_incremental_metrics(**ctx):
+    products_rows = int(ctx["ti"].xcom_pull(key="products_rows_loaded", task_ids="upsert_products") or 0)
+    users_rows = int(ctx["ti"].xcom_pull(key="users_rows_loaded", task_ids="upsert_users") or 0)
+    orders_rows = int(ctx["ti"].xcom_pull(key="orders_rows_loaded", task_ids="upsert_orders") or 0)
+
+    record_pipeline_metric(
+        dag_id=ctx["dag"].dag_id,
+        task_id=ctx["ti"].task_id,
+        run_id=ctx["run_id"],
+        run_type="hourly_incremental",
+        status="SUCCESS",
+        rows_loaded=products_rows + users_rows + orders_rows,
+        duration_seconds=duration_seconds_from_context(ctx),
+    )
+
+
 # ── DAG definition ────────────────────────────────────────────────────────
 
 with DAG(
@@ -351,6 +368,11 @@ with DAG(
         python_callable=_validate_incremental_loads,
     )
 
+    t_persist_incremental_metrics = PythonOperator(
+        task_id="persist_incremental_metrics",
+        python_callable=_persist_incremental_metrics,
+    )
+
     # ── Dependency graph ───────────────────────────────────────────────────
     start >> t_get_watermarks >> [t_extract_products, t_extract_users, t_extract_orders]
 
@@ -358,4 +380,4 @@ with DAG(
     t_extract_users    >> t_transform_users    >> t_upsert_users
     t_extract_orders   >> t_transform_orders   >> t_upsert_orders
 
-    [t_upsert_products, t_upsert_users, t_upsert_orders] >> t_validate_incremental_loads >> t_update_watermarks >> end
+    [t_upsert_products, t_upsert_users, t_upsert_orders] >> t_validate_incremental_loads >> t_update_watermarks >> t_persist_incremental_metrics >> end
